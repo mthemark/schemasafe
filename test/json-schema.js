@@ -22,6 +22,15 @@ const unsafe = new Set([
   // draft3 only
   'draft3/additionalItems.json/additionalItems should not look in applicators',
   'draft3/additionalProperties.json/additionalProperties should not look in applicators',
+
+  // ajv tests
+  'rules/if.json/then/else without if should be ignored',
+  'rules/if.json/if without then/else should be ignored',
+  'schemas/cosmicrealms.json/schema from cosmicrealms benchmark',
+  'schemas/advanced.json/advanced schema from z-schema benchmark (https://github.com/zaggino/z-schema)',
+  'issues/27_1_recursive_raml_schema.json/JSON Schema for a standard RAML object (#27)',
+  'issues/62_resolution_scope_change.json/resolution scope change - change folder (#62)',
+  'issues/70_swagger_schema.json/Swagger api schema does not compile (#70)',
 ])
 
 const unsupported = new Set([
@@ -57,6 +66,12 @@ const unsupported = new Set([
   'draft2019-09/ref.json/remote ref, containing refs itself',
   'draft2019-09/optional/refOfUnknownKeyword.json',
   'draft2019-09/optional/format/duration.json',
+
+  // ajv specific non-standard tests
+  'rules/format.json/whitelisted unknown format is valid',
+  'rules/format.json/validation of URL strings',
+  'rules/format.json/validation of JSON-pointer URI fragment strings',
+  'issues/33_json_schema_latest.json/use latest json schema as v4 (#33)',
 ])
 
 const schemas = [
@@ -124,10 +139,18 @@ function processTest(main, id, file, shouldIngore, requiresLax) {
         const mode = requiresLax(`${id}/${block.description}`) ? 'lax' : 'default'
         const $schemaDefault = schemaVersions.get(main)
         const extraFormats = main === 'draft3' // needs old formats
-        const validate = validator(block.schema, { schemas, mode, $schemaDefault, extraFormats })
-        for (const test of block.tests) {
-          if (shouldIngore(`${id}/${block.description}/${test.description}`)) continue
-          t.same(validate(test.data), test.valid, test.description)
+        const blockSchemas = [
+          ...(Object.hasOwnProperty.call(block, 'schema') ? [block.schema] : []),
+          ...(block.schemas || []),
+        ]
+        for (const schema of blockSchemas) {
+          // ajv sometimes specifies just the schema id as "schema"
+          const wrapped = typeof schema === 'string' ? { $ref: schema } : schema
+          const validate = validator(wrapped, { schemas, mode, $schemaDefault, extraFormats })
+          for (const test of block.tests) {
+            if (shouldIngore(`${id}/${block.description}/${test.description}`)) continue
+            t.same(validate(test.data), test.valid, test.description)
+          }
         }
       } catch (e) {
         t.fail(e)
@@ -138,9 +161,27 @@ function processTest(main, id, file, shouldIngore, requiresLax) {
   }
 }
 
+/** JSON Schema Test Suite tests **/
 const testsDir = 'JSON-Schema-Test-Suite/tests'
 processTestDir(testsDir, 'draft4')
 processTestDir(testsDir, 'draft6')
 processTestDir(testsDir, 'draft7')
 processTestDir(testsDir, 'draft3')
 processTestDir(testsDir, 'draft2019-09')
+
+/** ajv tests **/
+schemas.push(
+  ...[
+    require('./ajv-spec/remotes/bar.json'),
+    require('./ajv-spec/remotes/foo.json'),
+    require('./ajv-spec/remotes/buu.json'),
+    require('./ajv-spec/remotes/tree.json'),
+    require('./ajv-spec/remotes/node.json'),
+    require('./ajv-spec/remotes/second.json'),
+    require('./ajv-spec/remotes/first.json'),
+    require('./ajv-spec/remotes/scope_change.json'),
+  ]
+)
+processTestDir('ajv-spec/tests', 'issues')
+processTestDir('ajv-spec/tests', 'rules')
+processTestDir('ajv-spec/tests', 'schemas')
