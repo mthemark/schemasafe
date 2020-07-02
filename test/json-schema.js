@@ -185,3 +185,4 @@ schemas.push(
 processTestDir('ajv-spec/tests', 'issues')
 processTestDir('ajv-spec/tests', 'rules')
 processTestDir('ajv-spec/tests', 'schemas')
+processTestDir('ajv-spec', 'extras.part')
