@@ -2,7 +2,7 @@
 
 module.exports = [
   ...['$schema', '$vocabulary'], // version
-  ...['id', '$id', '$ref', 'definitions', '$defs'], // pointers
+  ...['id', '$id', '$ref', 'definitions', '$defs', '$recursiveRef', '$recursiveAnchor'], // pointers
   ...['type', 'required', 'default'], // generic
   ...['enum', 'const'], // constant values
   ...['not', 'allOf', 'anyOf', 'oneOf', 'if', 'then', 'else'], // logical checks
