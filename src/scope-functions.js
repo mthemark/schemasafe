@@ -74,4 +74,10 @@ function toPointer(path) {
   return `#/${path.map((part) => `${part}`.replace(/~/g, '~0').replace(/\//g, '~1')).join('/')}`
 }
 
-module.exports = { stringLength, isMultipleOf, deepEqual, unique, hasOwn, toPointer }
+function errorMerge({ schemaPath, dataPath, ...more }, schemaBase, dataBase) {
+  const err = { schemaPath: `${schemaBase}${schemaPath.slice(1)}` }
+  if (dataPath !== undefined) err.dataPath = `${dataBase}${dataPath.slice(1)}`
+  return { ...err, ...more }
+}
+
+module.exports = { stringLength, isMultipleOf, deepEqual, unique, hasOwn, toPointer, errorMerge }

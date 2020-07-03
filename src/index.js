@@ -203,11 +203,23 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
     const currPropVar = (...args) => propvar(current, ...args)
     const currPropImm = (...args) => propimm(current, ...args)
 
-    const error = ({ path = [], prop = current, ...more }) => {
-      if (includeErrors === true) {
-        const errorObj = { schemaPath: functions.toPointer([...schemaPath, ...path]), ...more }
+    const error = ({ path = [], prop = current, source, ...more }) => {
+      const schemaP = functions.toPointer([...schemaPath, ...path])
+      const dataP = buildPath(prop)
+      if (includeErrors === true && source) {
+        // we can include resolvedPath for resolved schema path later, perhaps
+        scope.errorMerge = functions.errorMerge
+        const args = verboseErrors ? format('%j, %s', schemaP, dataP) : format('%j', schemaP)
+        if (allErrors) {
+          fun.write('if (validate.errors === null) validate.errors = []')
+          fun.write('validate.errors.push(...%s.errors.map(e => errorMerge(e, %s)))', source, args)
+        } else {
+          fun.write('validate.errors = [errorMerge(%s.errors[0], %s)]', source, args)
+        }
+      } else if (includeErrors === true) {
+        const errorObj = { schemaPath: schemaP, ...more }
         const errorJS = verboseErrors
-          ? format('{ ...%j, dataPath: %s, value: %s }', errorObj, buildPath(prop), buildName(prop))
+          ? format('{ ...%j, dataPath: %s, value: %s }', errorObj, dataP, buildName(prop))
           : format('%j', errorObj)
         if (allErrors) {
           fun.write('if (validate.errors === null) validate.errors = []')
@@ -361,6 +373,19 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
       fun.write('if (%s) {', present(current))
     }
 
+    const applyRef = (n, errorArgs) => {
+      if (includeErrors) {
+        // Save and restore errors in case of recursion
+        const res = gensym('res')
+        const err = gensym('err')
+        fun.write('const %s = validate.errors', err)
+        fun.write('const %s = %s(%s)', res, n, name)
+        fun.write('validate.errors = %s', err)
+        errorIf('!%s', [res], { path: ['$ref'], source: n })
+      } else {
+        errorIf('!%s(%s)', [n, name], { path: ['$ref'] })
+      }
+    }
     if (node.$ref) {
       const resolved = resolveReference(root, schemas, node.$ref, basePath())
       const [sub, subRoot, path] = resolved[0] || []
@@ -371,11 +396,10 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
           cache.ref.set(sub, n)
           let fn = null // resolve cyclic dependencies
           scope[n] = (...args) => fn(...args)
-          const override = { includeErrors: false, jsonCheck: false, isJSON }
-          fn = compile(sub, subRoot, { ...opts, ...override }, scope, path)
+          fn = compile(sub, subRoot, { ...opts, jsonCheck: false, isJSON }, scope, path)
           scope[n] = fn
         }
-        errorIf('!%s(%s)', [n, name], { path: ['$ref'] })
+        applyRef(n, { path: ['$ref'] })
       } else {
         fail('failed to resolve $ref:', node.$ref)
       }
