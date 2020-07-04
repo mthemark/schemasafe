@@ -7,17 +7,6 @@ There are two possible types of errors:
 Schema compilation errors always throw synchronously to ensure that no invalid schemas get compiled
 and/or produce invalid validation code.
 
-## Validation errors
-
-At the moment of writing, correct error reporting is still in progress. \
-Most significant known issue is that error pointers stop at `$ref` usage.
-
-This does not affect the _result_ of the validation, just the information inside of the produced
-error objects.
-
-It's significantly better than in `is-my-json-valid` though.\
-Further improvements should bring this on par with `ajv`.
-
 ### Validation errors are opt-in
 
 Error reporting is disabled by default and is provided as an opt-in, because users who need to
@@ -42,5 +31,12 @@ The options relevant to error reporting are:
     That does not affect the result of validation, just the list of reported errors in those cases.
 
   * `verboseErrors` — include more information in each error object. Requires `includeErrors`.
+
+    Warning: `verboseErrors` reflect the original _unvalidated_ value as the `value` property of
+    each error, which is a _reference_ to the part of the orignal unvalidated object which failed
+    validation.
+
+    If the input was untrusted, then `value` property also should be treated as untrusted, e.g.
+    when manipulating it and/or reflecting it back to the user.
 
 All of those are opt-ins (i.e. `false` by default).
