@@ -68,7 +68,11 @@ const safewrap = (fun) => (...args) => {
   return new SafeString(fun(...args))
 }
 
-const safeor = safewrap((...args) => args.join(' || ') || 'false')
-const safeand = safewrap((...args) => args.join(' && ') || 'true')
+const safeor = safewrap(
+  (...args) => (args.some((arg) => `${arg}` === 'true') ? 'true' : args.join(' || ') || 'false')
+)
+const safeand = safewrap(
+  (...args) => (args.some((arg) => `${arg}` === 'false') ? 'false' : args.join(' && ') || 'true')
+)
 
 module.exports = { format, safe, safeor, safeand }
