@@ -1,6 +1,6 @@
 'use strict'
 
-const { format, safe, safeand, safeor } = require('./safe-format')
+const { format, safe, safeand, safeor, safeargs } = require('./safe-format')
 const genfun = require('./generate-function')
 const { resolveReference, joinPath, buildSchemas } = require('./pointer')
 const formats = require('./formats')
@@ -192,6 +192,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
   // Since undefined is not a valid JSON value, we coerce to null and other checks will catch this
   fun.write('if (data === undefined) data = null')
   if (optIncludeErrors) fun.write('validate.errors = null')
+  fun.write('validate.evaluatedDynamic = null')
   fun.write('let errors = 0')
 
   const recursiveAnchor = schema && schema.$recursiveAnchor === true
@@ -199,7 +200,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
   let jsonCheckPerformed = false
   const getMeta = () => rootMeta.get(root) || {}
   const basePathStack = basePathRoot ? [basePathRoot] : []
-  const visit = (allErrors, includeErrors, history, current, node, schemaPath) => {
+  const visit = (allErrors, includeErrors, history, current, node, schemaPath, trace = null) => {
     // e.g. top-level data and property names, OR already checked by present() in history, OR in keys and not undefined
     const definitelyPresent =
       !current.parent || history.includes(current) || current.checked || (current.inKeys && isJSON)
@@ -275,10 +276,49 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
       jsonCheckPerformed = true
     }
 
+    // evaluated tracing
+    const stat = { properties: [], items: 0 }
+    const propertiesSplit = (properties) => {
+      const strings = properties.filter((x) => typeof x === 'string')
+      const patterns = properties.filter((x) => typeof x === 'object')
+      /* c8 ignore next */
+      if (strings.length + patterns.length !== properties.length) throw new Error('Unreachable')
+      return { strings, patterns }
+    }
+    const evaluateDelta = (delta) => {
+      if (delta.items) stat.items = Math.max(stat.items, delta.items)
+      if (delta.properties) stat.properties.push(...delta.properties)
+    }
+    const evaluateDeltaDynamic = (delta) => {
+      // Skips applying those that have already been proved statically // TODO: improve filtering between scopes
+      if (dynamic.items && delta.items > stat.items)
+        fun.write('%s.push(%d)', dynamic.items, delta.items)
+      const have = new Set(stat.properties)
+      const properties = delta.properties.filter(prop => !have.has(prop))
+      if (dynamic.properties && properties.length > 0) {
+        if (properties.includes(true)) {
+          fun.write('%s.push(true)', dynamic.properties)
+        } else {
+          const { strings, patterns } = propertiesSplit(properties)
+          fun.write('%s.push(%s)', dynamic.properties, safeargs(
+            ...strings.map(key => format('%j', key)),
+            ...patterns.map(n => format('%s', n))
+          ))
+        }
+      }
+    }
+    const additionalCondition = (key, strings, patterns) => {
+      return safeand(
+        ...strings.map((n) => format('%s !== %j', key, n)),
+        ...patterns.map((n) => format('!%s.test(%s)', n, key))
+      )
+    }
+
     if (typeof node === 'boolean') {
       if (node === true) {
         // any is valid
         enforceValidation('schema = true is not allowed')
+        return stat // nothing is evaluated for true
       } else if (definitelyPresent) {
         // node === false always fails in this case
         error({})
@@ -286,7 +326,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
         // node === false
         errorIf('%s', [present(current)], {})
       }
-      return
+      return { properties: [true], items: Infinity } // everything is evaluated for false
     }
 
     enforce(node && Object.getPrototypeOf(node) === Object.prototype, 'Schema is not an object')
@@ -295,7 +335,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
 
     if (Object.keys(node).length === 0) {
       enforceValidation('empty rules node encountered')
-      return // nothing to validate here, basically the same as node === true
+      return stat // nothing to validate here, basically the same as node === true
     }
 
     const unused = new Set(Object.keys(node))
@@ -325,6 +365,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
           schemaVersions.indexOf(version) >
           schemaVersions.indexOf(`https://json-schema.org/${ver}/schema`)
         rootMeta.set(root, {
+          unevaluated: !schemaIsOlderThan('draft/2019-09'), // TODO: follow this
           exclusiveRefs: schemaIsOlderThan('draft/2019-09'),
           booleanRequired: schemaIsOlderThan('draft-04'),
         })
@@ -394,17 +435,25 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
     const applyRef = (n, errorArgs) => {
       // Allow recursion to here only if $recursiveAnchor is true, else skip from deep recursion
       const recursive = recursiveAnchor ? format('recursive || validate') : format('recursive')
-      if (includeErrors) {
-        // Save and restore errors in case of recursion
-        const res = gensym('res')
-        const err = gensym('err')
-        fun.write('const %s = validate.errors', err)
+      const res = gensym('res')
+      if (includeErrors || trace) {
+        const err = gensym('err') // Save and restore errors in case of recursion (if needed)
+        if (includeErrors) fun.write('const %s = validate.errors', err)
         fun.write('const %s = %s(%s, %s)', res, n, name, recursive)
-        fun.write('validate.errors = %s', err)
+        if (includeErrors) fun.write('validate.errors = %s', err)
         errorIf('!%s', [res], { ...errorArgs, source: n })
       } else {
         errorIf('!%s(%s, %s)', [n, name, recursive], errorArgs)
       }
+      // evaluated: propagate static from ref to current
+      if (scope[n] && scope[n].evaluatedStatic) evaluateDelta(scope[n].evaluatedStatic) // FIXME
+      // evaluated: propagate dynamic from ref to current
+      if (trace) fun.block('if (%s) {', [res], '}', () => {
+        if (trace.items && stat.items < Infinity)
+          fun.write('%s.push(...%s.evaluatedDynamic.items)', trace.items, n)
+        if (trace.properties && !stat.properties.includes(true))
+          fun.write('%s.push(...%s.evaluatedDynamic.properties)', trace.properties, n)
+      })
     }
     if (node.$ref) {
       const resolved = resolveReference(root, schemas, node.$ref, basePath())
@@ -428,7 +477,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
       if (getMeta().exclusiveRefs) {
         // ref overrides any sibling keywords for older schemas
         finish()
-        return
+        return stat
       }
     }
     if (node.$recursiveRef) {
@@ -477,6 +526,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
     }
 
     // Those checks will need to be skipped if another error is set in this block before those ones
+    // TODO: unevaluatedProperties + child patternProperties?
     const prev =
       allErrors && (node.uniqueItems || node.pattern || node.patternProperties || node.format)
         ? gensym('prev')
@@ -484,16 +534,68 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
     const prevWrap = (shouldWrap, writeBody) =>
       maybeWrap(prev !== null && shouldWrap, 'if (errors === %s) {', [prev], '}', writeBody)
 
+    const needUnevaluated = (rule) => node[rule] || node[rule] === false || node === schema // TODO: improve detection
+    const local = Object.freeze({
+      items: needUnevaluated('unevaluatedItems') ? gensym('evaluatedItems') : null,
+      properties: needUnevaluated('unevaluatedProperties') ? gensym('evaluatedProps') : null,
+    })
+    const dynamic = Object.freeze({
+      items: local.items || (trace && trace.items),
+      properties: local.properties || (trace && trace.properties),
+    })
+
     // Can not be used before undefined check above! The one performed by present()
     const rule = (...args) => visit(allErrors, includeErrors, [...history, current], ...args)
-    const subrule = (...args) => {
+    const subrule = (evaluate, ...args) => {
+      /* c8 ignore next */
+      if (evaluate && args[0] !== current) throw new Error('Unreachable')
       const result = gensym('sub')
       fun.write('const %s = (() => {', result)
       fun.write('let errors = 0') // scoped error flag, should be unused due to !includeErrors
-      visit(false, false, [...history, current], ...args)
+      const delta = visit(false, false, [...history, current], ...args, evaluate ? dynamic : null)
       fun.write('return errors === 0')
       fun.write('})()')
+      if (evaluate) fun.block('if (%s) {', [result], '}', () => evaluateDeltaDynamic(delta))
       return result
+    }
+
+    // Extracted single additional(Items/Properties) rules, for reuse with unevaluated(Items/Properties)
+    const additionalItems = (limit, ruleValue, rulePath) => {
+      if (ruleValue === false) {
+        if (removeAdditional) {
+          fun.write('if (%s.length > %s) %s.length = %s', name, limit, name, limit)
+        } else {
+          errorIf('%s.length > %s', [name, limit], { path: [rulePath] })
+        }
+      } else if (ruleValue) {
+        const i = genloop()
+        fun.block('for (let %s = %s; %s < %s.length; %s++) {', [i, limit, i, name, i], '}', () => {
+          const prop = currPropVar(i, unmodifiedPrototypes) // own property in Array if proto not mangled
+          rule(prop, ruleValue, subPath(rulePath))
+        })
+      } else {
+        /* c8 ignore next */
+        throw new Error('Unreachable')
+      }
+      stat.items = Infinity
+    }
+    const additionalProperties = (condition, ruleValue, rulePath) => {
+      const key = gensym('key')
+      fun.block('for (const %s of Object.keys(%s)) {', [key, name], '}', () => {
+        fun.block('if (%s) {', [condition(key)], '}', () => {
+          if (ruleValue === false) {
+            if (removeAdditional) {
+              fun.write('delete %s[%s]', name, key)
+            } else {
+              error({ path: [rulePath], prop: currPropVar(key) })
+            }
+          } else {
+            const sub = currPropVar(key, true) // always own property, from Object.keys
+            rule(sub, ruleValue, subPath(rulePath))
+          }
+        })
+      })
+      evaluateDelta({ properties: [true] })
     }
 
     /* Checks inside blocks are independent, they are happening on the same code depth */
@@ -607,12 +709,14 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
         if (Array.isArray(node.items)) {
           for (let p = 0; p < node.items.length; p++)
             rule(currPropImm(p), node.items[p], subPath(`${p}`))
+          evaluateDelta({ items: node.items.length })
         } else {
           const i = genloop()
           fun.block('for (let %s = 0; %s < %s.length; %s++) {', [i, i, name, i], '}', () => {
             const prop = currPropVar(i, unmodifiedPrototypes) // own property in Array if proto not mangled
             rule(prop, node.items, subPath('items'))
           })
+          stat.items = Infinity
         }
         consume('items', 'object', 'array', 'boolean')
       } else if (typeApplicable('array') && !hasSubValidation) {
@@ -623,21 +727,9 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
         // additionalItems is allowed, but ignored per some spec tests in this case!
         // We do nothing and let it throw except for in allowUnusedKeywords mode
         // As a result, this is not allowed by default, only in allowUnusedKeywords mode
-      } else if (node.additionalItems === false) {
-        const limit = node.items.length
-        if (removeAdditional) {
-          fun.write('if (%s.length > %d) %s.length = %d', name, limit, name, limit)
-        } else {
-          errorIf('%s.length > %d', [name, limit], { path: ['additionalItems'] })
-        }
-        consume('additionalItems', 'boolean')
-      } else if (node.additionalItems) {
-        const i = genloop()
-        const offset = node.items.length
-        fun.block('for (let %s = %d; %s < %s.length; %s++) {', [i, offset, i, name, i], '}', () => {
-          const prop = currPropVar(i, unmodifiedPrototypes) // own property in Array if proto not mangled
-          rule(prop, node.additionalItems, subPath('additionalItems'))
-        })
+      } else if (node.additionalItems || node.additionalItems === false) {
+        const limit = format('%d', node.items.length)
+        additionalItems(limit, node.additionalItems, 'additionalItems')
         consume('additionalItems', 'object', 'boolean')
       } else if (node.items.length === node.maxItems) {
         // No additional items are possible
@@ -652,7 +744,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
         const i = genloop()
         fun.block('for (let %s = 0; %s < %s.length; %s++) {', [i, i, name, i], '}', () => {
           const prop = currPropVar(i, unmodifiedPrototypes) // own property in Array if proto not mangled
-          fun.write('if (%s) %s++', subrule(prop, node.contains, subPath('contains')), passes)
+          fun.write('if (%s) %s++', subrule(false, prop, node.contains, subPath('contains')), passes)
         })
 
         if (Number.isFinite(node.minContains)) {
@@ -752,7 +844,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
               dependencies !== 'dependentRequired'
             ) {
               fun.block('if (%s) {', [present(item)], '}', () => {
-                rule(current, deps, subPath(dependencies, key))
+                evaluateDeltaDynamic(rule(current, deps, subPath(dependencies, key), dynamic)) // marks evaluated
               })
             } else {
               fail(`Unexpected ${dependencies} entry`)
@@ -768,6 +860,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
           const checked = !allErrors && Array.isArray(node.required) && node.required.includes(p)
           rule(currPropImm(p, checked), node.properties[p], subPath('properties', p))
         }
+        evaluateDelta({ properties: Object.keys(node.properties || {}) })
         consume('properties', 'object')
       }
 
@@ -783,34 +876,19 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
               })
             }
           })
+          evaluateDelta({ properties: Object.keys(node.patternProperties || {}).map(patterns) })
           consume('patternProperties', 'object')
         }
 
         if (node.additionalProperties || node.additionalProperties === false) {
-          const key = gensym('key')
-          const toCompare = (p) => format('%s !== %j', key, p)
-          const toTest = (p) => format('!%s.test(%s)', patterns(p), key)
-          const additionalProp = safeand(
-            ...Object.keys(node.properties || {}).map(toCompare),
-            ...Object.keys(node.patternProperties || {}).map(toTest)
+          const condition = (key) => additionalCondition(key,
+            Object.keys(node.properties || {}),
+            Object.keys(node.patternProperties || {}).map(patterns)
           )
-          fun.block('for (const %s of Object.keys(%s)) {', [key, name], '}', () => {
-            fun.block('if (%s) {', [additionalProp], '}', () => {
-              if (node.additionalProperties === false) {
-                if (removeAdditional) {
-                  fun.write('delete %s[%s]', name, key)
-                } else {
-                  error({ path: ['additionalProperties'], prop: currPropVar(key) })
-                }
-              } else {
-                const sub = currPropVar(key, true) // always own property, from Object.keys
-                rule(sub, node.additionalProperties, subPath('additionalProperties'))
-              }
-            })
-          })
+          additionalProperties(condition, node.additionalProperties, 'additionalProperties')
           consume('additionalProperties', 'object', 'boolean')
         } else if (typeApplicable('object') && !hasSubValidation) {
-          enforceValidation('additionalProperties rule must be specified')
+          enforceValidation('additionalProperties or unevaluatedProperties rule must be specified')
         }
       })
     }
@@ -835,22 +913,22 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
 
     const checkGeneric = () => {
       if (node.not || node.not === false) {
-        const sub = subrule(current, node.not, subPath('not'))
+        const sub = subrule(false, current, node.not, subPath('not'))
         errorIf('%s', [sub], { path: ['not'] })
         consume('not', 'object', 'boolean')
       }
 
       const thenOrElse = node.then || node.then === false || node.else || node.else === false
       if ((node.if || node.if === false) && thenOrElse) {
-        const sub = subrule(current, node.if, subPath('if'))
+        const sub = subrule(true, current, node.if, subPath('if')) // marks evaluated
         fun.write('if (!%s) {', sub)
         if (node.else || node.else === false) {
-          rule(current, node.else, subPath('else'))
+          evaluateDeltaDynamic(rule(current, node.else, subPath('else'), dynamic)) // marks evaluated
           consume('else', 'object', 'boolean')
         }
         if (node.then || node.then === false) {
           fun.write('} else {')
-          rule(current, node.then, subPath('then'))
+          evaluateDeltaDynamic(rule(current, node.then, subPath('then'), dynamic)) // marks evaluated
           consume('then', 'object', 'boolean')
         }
         fun.write('}')
@@ -859,15 +937,23 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
 
       if (node.allOf !== undefined) {
         enforce(Array.isArray(node.allOf), 'Invalid allOf')
-        node.allOf.forEach((sch, key) => rule(current, sch, subPath('allOf', key)))
+        for (const [key, sch] of Object.entries(node.allOf))
+          evaluateDelta(rule(current, sch, subPath('allOf', key), dynamic)) // marks evaluated
         consume('allOf', 'array')
       }
 
       if (node.anyOf !== undefined) {
         enforce(Array.isArray(node.anyOf), 'Invalid anyOf')
-        for (const sch of node.anyOf) fun.write('if (!%s) {', subrule(current, sch, schemaPath))
-        error({ path: ['anyOf'] })
-        node.anyOf.forEach(() => fun.write('}'))
+        if (dynamic.items || dynamic.properties) {
+          // In this case, all have to be checked to gather evaluated properties
+          const subs = node.anyOf.map(sch => subrule(true, current, sch, schemaPath)) // marks evaluated
+          errorIf('!(%s)', [safeor(...subs)], { path: ['anyOf'] })
+        } else {
+          for (const sch of node.anyOf)
+            fun.write('if (!%s) {', subrule(false, current, sch, schemaPath))
+          error({ path: ['anyOf'] })
+          node.anyOf.forEach(() => fun.write('}'))
+        }
         consume('anyOf', 'array')
       }
 
@@ -875,11 +961,41 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
         enforce(Array.isArray(node.oneOf), 'Invalid oneOf')
         const passes = gensym('passes')
         fun.write('let %s = 0', passes)
-        for (const sch of node.oneOf)
-          fun.write('if (%s) %s++', subrule(current, sch, schemaPath), passes)
+        for (const sch of node.oneOf) {
+          const sub = subrule(true, current, sch, schemaPath) // marks evaluated
+          fun.write('if (%s) %s++', sub, passes)
+        }
         errorIf('%s !== 1', [passes], { path: ['oneOf'] })
         consume('oneOf', 'array')
       }
+    }
+
+    // Unevaluated validation
+    const checkArraysFinal = () => {
+      if (stat.items === Infinity) {
+        // Everything is statally evaluated, so this check is unreachable. Allow only 'false' rule here.
+        if (node.unevaluatedItems === false) consume('unevaluatedItems', 'boolean')
+      } else if (node.unevaluatedItems || node.unevaluatedItems === false) {
+        const limit = format('Math.max(%d, ...%s)', stat.items, dynamic.items)
+        additionalItems(limit, node.unevaluatedItems, 'unevaluatedItems')
+        consume('unevaluatedItems', 'object', 'boolean')
+      }
+    }
+    const checkObjectsFinal = () => {
+      prevWrap(node.patternProperties, () => {
+        if (stat.properties.includes(true)) {
+          // Everything is statally evaluated, so this check is unreachable. Allow only 'false' rule here.
+          if (node.unevaluatedProperties === false) consume('unevaluatedProperties', 'boolean')
+        } else if (node.unevaluatedProperties || node.unevaluatedProperties === false) {
+          scope.propertyIn = functions.propertyIn
+          const { strings, patterns } = propertiesSplit(stat.properties)
+          const sawStatic = (key) => additionalCondition(key, strings, patterns)
+          const condition = (key) =>
+            format('%s && !propertyIn(%s, %s)', sawStatic(key), key, dynamic.properties)
+          additionalProperties(condition, node.unevaluatedProperties, 'unevaluatedProperties')
+          consume('unevaluatedProperties', 'object', 'boolean')
+        }
+      })
     }
 
     const typeWrap = (checkBlock, validTypes, queryType) => {
@@ -893,6 +1009,10 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
 
     /* Actual post-$ref validation happens here */
 
+    // evaluated: declare dynamic
+    if (local.items) fun.write('const %s = [0]', local.items)
+    if (local.properties) fun.write('const %s = []', local.properties)
+
     const needTypeValidation = typeArray !== null
     if (needTypeValidation) {
       const typeValidate = safeor(...typeArray.map((t) => types.get(t)(name)))
@@ -904,21 +1024,38 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
     maybeWrap(needTypeValidation && allErrors, 'else {', [], '}', () => {
       if (prev !== null) fun.write('let %s = errors', prev)
       if (checkConst()) {
+        evaluateDelta({ properties: [true], items: Infinity }) // everything is evaluated for const
         // const/enum shouldn't have any other validation rules except for already checked type/$ref
         enforce(unused.size === 0, 'Unexpected keywords mixed with const or enum:', [...unused])
         return
       }
+
       typeWrap(checkNumbers, ['number', 'integer'], types.get('number')(name))
       typeWrap(checkStrings, ['string'], types.get('string')(name))
       typeWrap(checkArrays, ['array'], types.get('array')(name))
       typeWrap(checkObjects, ['object'], types.get('object')(name))
       checkGeneric()
+
+      // evaluated: apply static + dynamic
+      typeWrap(checkArraysFinal, ['array'], types.get('array')(name))
+      typeWrap(checkObjectsFinal, ['object'], types.get('object')(name))
+      // evaluated: propagate dynamic to parent dynamic
+      if (trace && trace.items && local.items && stat.items < Infinity)
+        fun.write('%s.push(...%s)', trace.items, local.items)
+      if (trace && trace.properties && local.properties && !stat.properties.includes(true))
+        fun.write('%s.push(...%s)', trace.properties, local.properties)
+      // evaluated: static to parent is merged via return value
     })
 
+    // evaluated: return dynamic for refs
+    if (node === schema)
+      fun.write('validate.evaluatedDynamic = { items: %s, properties: %s }', local.items, local.properties)
+
     finish()
+    return stat // return statically evaluated
   }
 
-  visit(optAllErrors, optIncludeErrors, [], { name: safe('data') }, schema, [])
+  const stat = visit(optAllErrors, optIncludeErrors, [], { name: safe('data') }, schema, [])
 
   fun.write('return errors === 0')
   fun.write('}')
@@ -928,6 +1065,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
   const validate = fun.makeFunction(scope)
   validate.toModule = () => fun.makeModule(scope)
   validate.toJSON = () => schema
+  validate.evaluatedStatic = stat
   return validate
 }
 

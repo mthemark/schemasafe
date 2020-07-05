@@ -74,5 +74,6 @@ const safeor = safewrap(
 const safeand = safewrap(
   (...args) => (args.some((arg) => `${arg}` === 'false') ? 'false' : args.join(' && ') || 'true')
 )
+const safeargs = safewrap((...args) => args.join(', '))
 
-module.exports = { format, safe, safeor, safeand }
+module.exports = { format, safe, safeor, safeand, safeargs }

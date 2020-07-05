@@ -80,4 +80,11 @@ function errorMerge({ schemaPath, dataPath, ...more }, schemaBase, dataBase) {
   return { ...err, ...more }
 }
 
-module.exports = { stringLength, isMultipleOf, deepEqual, unique, hasOwn, toPointer, errorMerge }
+const propertyIn = (key, properties) =>
+  properties.includes(true) ||
+  properties.some((prop) => typeof prop === 'string' && prop === key) ||
+  properties.some((prop) => prop instanceof RegExp && prop.test(key))
+
+const extraUtil = { toPointer, errorMerge, propertyIn }
+
+module.exports = { stringLength, isMultipleOf, deepEqual, unique, hasOwn, ...extraUtil }
