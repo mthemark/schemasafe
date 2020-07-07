@@ -55,10 +55,10 @@ const buildName = ({ name, parent, keyval, keyname }) => {
     if (parent || keyval || keyname) throw new Error('name can be used only stand-alone')
     return name // top-level
   }
-  if (!parent) throw new Error('Can not use property of undefined parent!')
+  if (!parent) throw new Error('Cannot use property of undefined parent!')
   const parentName = buildName(parent)
   if (keyval !== undefined) {
-    if (keyname) throw new Error('Can not use key value and name together')
+    if (keyname) throw new Error('Cannot use key value and name together')
     if (!['string', 'number'].includes(typeof keyval)) throw new Error('Invalid property path')
     if (/^[a-z][a-z0-9_]*$/i.test(keyval)) return format('%s.%s', parentName, safe(keyval))
     return format('%s[%j]', parentName, keyval)
@@ -114,7 +114,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
   if (mode === 'strong' && (weakFormats || allowUnusedKeywords))
     throw new Error('Strong mode forbids weakFormats and allowUnusedKeywords')
   if (optIsJSON && jsonCheck)
-    throw new Error('Can not specify both isJSON and jsonCheck options, please choose one')
+    throw new Error('Cannot specify both isJSON and jsonCheck options, please choose one')
   const isJSON = optIsJSON || jsonCheck
   const schemas = buildSchemas(optSchemas)
 
@@ -339,9 +339,9 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
     if (node.default !== undefined && !useDefaults) consume('default', 'jsonval') // unused in this case
     const defaultIsPresent = node.default !== undefined && useDefaults // will consume on use
     if (definitelyPresent) {
-      if (defaultIsPresent) fail('Can not apply default value here (e.g. at root)')
+      if (defaultIsPresent) fail('Cannot apply default value here (e.g. at root)')
       if (node.required === true || node.required === false)
-        fail('Can not apply boolean required here (e.g. at root)')
+        fail('Cannot apply boolean required here (e.g. at root)')
     } else if (defaultIsPresent || booleanRequired) {
       fun.write('if (!(%s)) {', present(current))
       if (defaultIsPresent) {
@@ -433,7 +433,7 @@ const compile = (schema, root, opts, scope, basePathRoot) => {
     const prevWrap = (shouldWrap, writeBody) =>
       maybeWrap(prev !== null && shouldWrap, 'if (errors === %s) {', [prev], '}', writeBody)
 
-    // Can not be used before undefined check above! The one performed by present()
+    // Cannot be used before undefined check above! The one performed by present()
     const rule = (...args) => visit(allErrors, includeErrors, [...history, current], ...args)
     const subrule = (...args) => {
       const result = gensym('sub')

@@ -26,7 +26,7 @@ tape('valid', (t) => {
 
 tape('invalid', (t) => {
   for (const source of [0, {}, [], { foo() {} }.foo])
-    t.throws(() => jaystring(source), /Can not stringify:/, inspect(source))
+    t.throws(() => jaystring(source), /Cannot stringify:/, inspect(source))
 
   t.end()
 })
